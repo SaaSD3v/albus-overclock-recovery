@@ -185,6 +185,55 @@ else
 fi
 
 # ============================================================
+# 2c. PATCH GPU clock driver: add 700 MHz to freq table
+# ============================================================
+note "Patch GPU clock driver: add ${GPU_MHZ} MHz to gfx3d freq table"
+
+GPU_CLOCK_FILE="${WORK_DIR}/kernel/drivers/clk/msm/clock-gpu-cobalt.c"
+[[ -f "$GPU_CLOCK_FILE" ]] || die "clock-gpu-cobalt.c not found: $GPU_CLOCK_FILE"
+
+# Add 700 MHz entry to ftbl_gfx3d_clk_src[] (PLL at 1400 MHz, even divider /2)
+# Original last entry: F_SLEW( 650000000, 1300000000, gpu_pll0_pll_out_even, 1, 0, 0),\n\tF_END
+# New: add 700 MHz line before F_END
+sed -i '/F_SLEW( 650000000, 1300000000, gpu_pll0_pll_out_even,    1, 0, 0),/a\\tF_SLEW( 700000000, 1400000000, gpu_pll0_pll_out_even,    1, 0, 0),' "$GPU_CLOCK_FILE"
+
+# Raise GPU PLL NOMINAL ceiling from 1300000500 to 1500000000 to allow 1400 MHz PLL output
+sed -i 's/VDD_GPU_PLL_FMAX_MAP3(MIN, 252000000, LOWER, 504000000,\t\t\t\tNOMINAL, 1300000500)/VDD_GPU_PLL_FMAX_MAP3(MIN, 252000000, LOWER, 504000000,\t\t\t\tNOMINAL, 1500000000)/g' "$GPU_CLOCK_FILE"
+
+# Verify
+if grep -q "700000000.*gpu_pll0_pll_out_even" "$GPU_CLOCK_FILE"; then
+  note "GPU clock driver patched: 700 MHz entry added"
+else
+  die "Failed to patch GPU clock driver freq table"
+fi
+
+if grep -q "1500000000" "$GPU_CLOCK_FILE"; then
+  note "GPU PLL NOMINAL ceiling raised to 1500 MHz"
+else
+  die "Failed to raise GPU PLL NOMINAL ceiling"
+fi
+
+# ============================================================
+# 2d. PATCH KGSL driver: bypass clk_round_rate for GPU freqs
+# ============================================================
+note "Patch kgsl_pwrctrl.c: bypass clk_round_rate for GPU OC freqs"
+
+KGSL_FILE="${WORK_DIR}/kernel/drivers/gpu/msm/kgsl_pwrctrl.c"
+[[ -f "$KGSL_FILE" ]] || die "kgsl_pwrctrl.c not found: $KGSL_FILE"
+
+# The KGSL driver calls clk_round_rate() on each GPU power level freq.
+# If the GPU clock driver rejects 700 MHz, it rounds down to 650 MHz.
+# Patch: use raw DTS value instead of clk_round_rate result.
+sed -i 's/freq = clk_round_rate(pwr->grp_clks\[0\], freq);/freq = freq; \/\* OC: bypass GPU round_rate *\//g' "$KGSL_FILE"
+
+# Verify
+if grep -q "OC: bypass GPU round_rate" "$KGSL_FILE"; then
+  note "KGSL driver patched successfully"
+else
+  die "Failed to patch KGSL driver"
+fi
+
+# ============================================================
 # 3. PATCH the DTS files BEFORE compilation
 # ============================================================
 note "Patch DTS: GPU ${STOCK_GPU_HZ} Hz -> ${TARGET_GPU_HZ} Hz, CPU ${STOCK_CPU_HZ} Hz -> ${TARGET_CPU_HZ} Hz"
@@ -450,6 +499,9 @@ FINAL_SHA256="$(sha256_of "${ARTIFACT_DIR}/recovery.img")"
   printf 'cpu_cpufreq_change=%s -> %s KHz (cpufreq-table)\n' "$STOCK_CPU_KHZ" "$TARGET_CPU_KHZ"
   printf 'cpu_max_rate_patched=yes\n'
   printf 'vdd_mx_patched=yes\n'
+  printf 'gpu_freq_table_patched=yes\n'
+  printf 'gpu_pll_nominal_patched=yes\n'
+  printf 'kgsl_round_rate_bypassed=yes\n'
 } > "${ARTIFACT_DIR}/build-info.txt"
 
 (
