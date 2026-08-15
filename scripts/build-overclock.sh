@@ -138,9 +138,9 @@ clone_tag "$ARM_TOOLCHAIN_REPO" "$TOOLCHAIN_TAG" "$ARM_TOOLCHAIN_TAG_OBJECT" "$A
 clone_commit "$DTBTOOL_REPO" "$DTBTOOL_COMMIT" "${WORK_DIR}/dtbtool"
 
 # ============================================================
-# 2. PATCH: Increase CPU max_rate in clock-cpu-8953.c
+# 2. PATCH: Increase CPU max_rate + freq table in clock-cpu-8953.c
 # ============================================================
-note "Patch CPU max_rate: 2208 MHz -> 2500 MHz"
+note "Patch CPU clock driver: 2208 MHz -> ${CPU_MHZ} MHz"
 
 CLOCK_CPU_FILE="${WORK_DIR}/kernel/drivers/clk/msm/clock-cpu-8953.c"
 [[ -f "$CLOCK_CPU_FILE" ]] || die "clock-cpu-8953.c not found: $CLOCK_CPU_FILE"
@@ -151,9 +151,16 @@ sed -i 's/\.max_rate = 2208000000UL/.max_rate = 2500000000UL/g' "$CLOCK_CPU_FILE
 # Increase VDD_MX limit from 2.4 GHz to 2.6 GHz
 sed -i 's/VDD_MX_HF_FMAX_MAP1(SVS, 2400000000UL)/VDD_MX_HF_FMAX_MAP1(SVS, 2600000000UL)/g' "$CLOCK_CPU_FILE"
 
+# CRITICAL: Patch the hardcoded frequency table apcs_clk_freq_tbl_8953[]
+# The cpufreq driver maps DTS entries to this table. If 2300 MHz isn't here,
+# cpufreq caps at the highest entry that IS in this table (2150.4 MHz).
+sed -i "s/${STOCK_CPU_HZ}/${TARGET_CPU_HZ}/g" "$CLOCK_CPU_FILE"
+note "Patched apcs_clk_freq_tbl_8953[]: $(grep -c "${TARGET_CPU_HZ}" "$CLOCK_CPU_FILE") occurrence(s) of ${TARGET_CPU_HZ} Hz"
+
 # Verify patches
 grep -q "2500000000UL" "$CLOCK_CPU_FILE" || die "CPU max_rate patch failed"
 grep -q "2600000000UL" "$CLOCK_CPU_FILE" || die "VDD_MX patch failed"
+grep -q "${TARGET_CPU_HZ}" "$CLOCK_CPU_FILE" || die "CPU freq table patch failed"
 note "CPU driver patched successfully"
 
 # ============================================================
@@ -167,10 +174,21 @@ CPU_DTS="${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953.dtsi"
 [[ -f "$GPU_DTS" ]] || die "GPU DTS not found: $GPU_DTS"
 [[ -f "$CPU_DTS" ]] || die "CPU DTS not found: $CPU_DTS"
 
-# Patch GPU: replace 650000000 with TARGET_GPU_HZ
-grep -q "$STOCK_GPU_HZ" "$GPU_DTS" || die "Stock GPU freq $STOCK_GPU_HZ not found in $GPU_DTS"
-sed -i "s/${STOCK_GPU_HZ}/${TARGET_GPU_HZ}/g" "$GPU_DTS"
-note "GPU patched: $(grep -c "$TARGET_GPU_HZ" "$GPU_DTS") occurrence(s) of $TARGET_GPU_HZ in msm8953-gpu.dtsi"
+# Patch GPU: replace stock GPU freq with target in ALL msm8953* DTS files
+# The chip reads speed-bin OPP from efuse — must patch ALL bins, not just speed7
+note "Patch GPU freq across ALL msm8953* DTS files"
+GPU_TOTAL=0
+for dtsi in "${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953"*.dtsi; do
+  [[ -f "$dtsi" ]] || continue
+  count=$(grep -c "${STOCK_GPU_HZ}" "$dtsi" 2>/dev/null || true)
+  if [[ "$count" -gt 0 ]]; then
+    sed -i "s/${STOCK_GPU_HZ}/${TARGET_GPU_HZ}/g" "$dtsi"
+    note "GPU patched in $(basename "$dtsi"): $count occurrence(s)"
+    GPU_TOTAL=$((GPU_TOTAL + count))
+  fi
+done
+[[ "$GPU_TOTAL" -gt 0 ]] || die "Stock GPU freq $STOCK_GPU_HZ not found in any DTS file"
+note "Total GPU patches: $GPU_TOTAL"
 
 # Patch CPU speed-bin tables (Hz) — these are what the clock driver actually reads
 grep -q "$STOCK_CPU_HZ" "$CPU_DTS" || die "Stock CPU freq $STOCK_CPU_HZ Hz not found in $CPU_DTS"
@@ -183,7 +201,7 @@ if grep -q "$STOCK_CPU_KHZ" "$CPU_DTS"; then
   note "CPU cpufreq-table patched: $(grep -c "$TARGET_CPU_KHZ" "$CPU_DTS") occurrence(s) of $TARGET_CPU_KHZ KHz in msm8953.dtsi"
 fi
 
-# Also patch any other speed-bin DTS files for higher speed bins
+# Also patch any other speed-bin DTS files for CPU
 for dtsi in "${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953"*.dtsi; do
   [[ -f "$dtsi" ]] || continue
   [[ "$dtsi" == "$CPU_DTS" ]] && continue
