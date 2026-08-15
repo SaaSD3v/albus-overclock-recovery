@@ -1,0 +1,23 @@
+# Build artifacts
+artifacts/
+*.img
+*.zip
+
+# Working directories
+tmp/
+work/
+out/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

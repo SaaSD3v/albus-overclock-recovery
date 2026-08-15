@@ -1,0 +1,97 @@
+name: Build Overclocked Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_mhz:
+        description: "GPU MHz (stock: 650, max recommended: 950)"
+        required: false
+        default: "700"
+      cpu_mhz:
+        description: "CPU MHz (stock: 2208, max recommended: 2500)"
+        required: false
+        default: "2300"
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build-overclock.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: overclock-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bc \
+            bison \
+            build-essential \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lzma \
+            python-is-python3 \
+            unzip \
+            xz-utils
+
+      - name: Validate overclock values
+        run: |
+          GPU_MHZ="${{ github.event.inputs.gpu_mhz || '700' }}"
+          CPU_MHZ="${{ github.event.inputs.cpu_mhz || '2300' }}"
+          
+          # Validate GPU MHz
+          if [ "$GPU_MHZ" -lt 650 ] || [ "$GPU_MHZ" -gt 950 ]; then
+            echo "ERROR: GPU_MHZ must be between 650 and 950"
+            exit 1
+          fi
+          
+          # Validate CPU MHz
+          if [ "$CPU_MHZ" -lt 2208 ] || [ "$CPU_MHZ" -gt 2500 ]; then
+            echo "ERROR: CPU_MHZ must be between 2208 and 2500"
+            exit 1
+          fi
+          
+          echo "GPU: ${GPU_MHZ} MHz (stock: 650)"
+          echo "CPU: ${CPU_MHZ} MHz (stock: 2208)"
+
+      - name: Build overclocked recovery
+        env:
+          GPU_MHZ: ${{ github.event.inputs.gpu_mhz || '700' }}
+          CPU_MHZ: ${{ github.event.inputs.cpu_mhz || '2300' }}
+        run: |
+          chmod +x scripts/build-overclock.sh
+          bash scripts/build-overclock.sh
+
+      - name: Upload recovery
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-overclock-gpu${{ github.event.inputs.gpu_mhz || '700' }}-cpu${{ github.event.inputs.cpu_mhz || '2300' }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Print build info
+        if: always()
+        run: |
+          if [ -f artifacts/build-info.txt ]; then
+            echo "## Build Info" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat artifacts/build-info.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
