@@ -13,10 +13,12 @@ readonly CPU_MHZ="${CPU_MHZ:-2300}"
 # Stock frequencies
 readonly STOCK_GPU_HZ=650000000
 readonly STOCK_CPU_KHZ=2208000
+readonly STOCK_CPU_HZ=2208000000
 
 # Target frequencies
 readonly TARGET_GPU_HZ=$((GPU_MHZ * 1000000))
 readonly TARGET_CPU_KHZ=$((CPU_MHZ * 1000))
+readonly TARGET_CPU_HZ=$((CPU_MHZ * 1000000))
 
 # Repository settings
 readonly KERNEL_REPO="https://github.com/SaaSD3v/android_kernel_motorola_msm8996.git"
@@ -157,7 +159,7 @@ note "CPU driver patched successfully"
 # ============================================================
 # 3. PATCH the DTS files BEFORE compilation
 # ============================================================
-note "Patch DTS: GPU ${STOCK_GPU_HZ} Hz -> ${TARGET_GPU_HZ} Hz, CPU ${STOCK_CPU_KHZ} KHz -> ${TARGET_CPU_KHZ} KHz"
+note "Patch DTS: GPU ${STOCK_GPU_HZ} Hz -> ${TARGET_GPU_HZ} Hz, CPU ${STOCK_CPU_HZ} Hz -> ${TARGET_CPU_HZ} Hz"
 
 GPU_DTS="${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953-gpu.dtsi"
 CPU_DTS="${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953.dtsi"
@@ -168,12 +170,28 @@ CPU_DTS="${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953.dtsi"
 # Patch GPU: replace 650000000 with TARGET_GPU_HZ
 grep -q "$STOCK_GPU_HZ" "$GPU_DTS" || die "Stock GPU freq $STOCK_GPU_HZ not found in $GPU_DTS"
 sed -i "s/${STOCK_GPU_HZ}/${TARGET_GPU_HZ}/g" "$GPU_DTS"
-note "GPU patched: $(grep -c "$TARGET_GPU_HZ" "$GPU_DTS") occurrence(s) of $TARGET_GPU_HZ"
+note "GPU patched: $(grep -c "$TARGET_GPU_HZ" "$GPU_DTS") occurrence(s) of $TARGET_GPU_HZ in msm8953-gpu.dtsi"
 
-# Patch CPU: replace last cpufreq-table entry 2208000 with TARGET_CPU_KHZ
-grep -q "$STOCK_CPU_KHZ" "$CPU_DTS" || die "Stock CPU freq $STOCK_CPU_KHZ not found in $CPU_DTS"
-sed -i "s/< ${STOCK_CPU_KHZ} >/< ${TARGET_CPU_KHZ} >/g" "$CPU_DTS"
-note "CPU patched: $(grep -c "$TARGET_CPU_KHZ" "$CPU_DTS") occurrence(s) of $TARGET_CPU_KHZ"
+# Patch CPU speed-bin tables (Hz) — these are what the clock driver actually reads
+grep -q "$STOCK_CPU_HZ" "$CPU_DTS" || die "Stock CPU freq $STOCK_CPU_HZ Hz not found in $CPU_DTS"
+sed -i "s/${STOCK_CPU_HZ}/${TARGET_CPU_HZ}/g" "$CPU_DTS"
+note "CPU speed-bin patched: $(grep -c "$TARGET_CPU_HZ" "$CPU_DTS") occurrence(s) of $TARGET_CPU_HZ Hz in msm8953.dtsi"
+
+# Also patch cpufreq-table (KHz) as fallback
+if grep -q "$STOCK_CPU_KHZ" "$CPU_DTS"; then
+  sed -i "s/< ${STOCK_CPU_KHZ} >/< ${TARGET_CPU_KHZ} >/g" "$CPU_DTS"
+  note "CPU cpufreq-table patched: $(grep -c "$TARGET_CPU_KHZ" "$CPU_DTS") occurrence(s) of $TARGET_CPU_KHZ KHz in msm8953.dtsi"
+fi
+
+# Also patch any other speed-bin DTS files for higher speed bins
+for dtsi in "${WORK_DIR}/kernel/arch/arm/boot/dts/qcom/msm8953"*.dtsi; do
+  [[ -f "$dtsi" ]] || continue
+  [[ "$dtsi" == "$CPU_DTS" ]] && continue
+  if grep -q "$STOCK_CPU_HZ" "$dtsi"; then
+    sed -i "s/${STOCK_CPU_HZ}/${TARGET_CPU_HZ}/g" "$dtsi"
+    note "CPU patched in $(basename "$dtsi"): $(grep -c "$TARGET_CPU_HZ" "$dtsi") occurrence(s)"
+  fi
+done
 
 # ============================================================
 # 4. Build kernel
@@ -232,45 +250,87 @@ cc \
 [[ "$(dd if="${WORK_DIR}/dt.img" bs=1 count=4 status=none)" == "QCDT" ]] \
   || die "dt.img does not contain the QCDT magic"
 
+# Verify compiled DTBs contain overclocked frequencies
+note "Verify compiled DTBs contain overclocked frequencies"
+GPU_HZ_BYTES=$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( (TARGET_GPU_HZ >> 24) & 0xFF )) $(( (TARGET_GPU_HZ >> 16) & 0xFF )) $(( (TARGET_GPU_HZ >> 8) & 0xFF )) $(( TARGET_GPU_HZ & 0xFF )))
+CPU_HZ_BYTES=$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( (TARGET_CPU_HZ >> 24) & 0xFF )) $(( (TARGET_CPU_HZ >> 16) & 0xFF )) $(( (TARGET_CPU_HZ >> 8) & 0xFF )) $(( TARGET_CPU_HZ & 0xFF )))
+
+GPU_IN_DT=$(python3 -c "
+import sys
+with open('${WORK_DIR}/dt.img', 'rb') as f:
+    data = f.read()
+import struct
+target = struct.pack('>I', ${TARGET_GPU_HZ})
+stock = struct.pack('>I', ${STOCK_GPU_HZ})
+print(f'GPU {${TARGET_GPU_HZ}} Hz: {data.count(target)} occurrence(s)')
+print(f'GPU {${STOCK_GPU_HZ}} Hz (stock): {data.count(stock)} occurrence(s)')
+" 2>&1) || true
+note "$GPU_IN_DT"
+
+CPU_IN_DT=$(python3 -c "
+import sys
+with open('${WORK_DIR}/dt.img', 'rb') as f:
+    data = f.read()
+import struct
+target_hz = struct.pack('>I', ${TARGET_CPU_HZ})
+stock_hz = struct.pack('>I', ${STOCK_CPU_HZ})
+print(f'CPU {${TARGET_CPU_HZ}} Hz: {data.count(target_hz)} occurrence(s)')
+print(f'CPU ${STOCK_CPU_HZ} Hz (stock): {data.count(stock_hz)} occurrence(s)')
+" 2>&1) || true
+note "$CPU_IN_DT"
+
 # ============================================================
 # 6. Binary-patch DTBs inside QCDT image
 # ============================================================
 note "Binary-patch QCDT image for overclock frequencies"
-python3 - "${WORK_DIR}/dt.img" "$TARGET_GPU_HZ" "$STOCK_GPU_HZ" "$TARGET_CPU_KHZ" "$STOCK_CPU_KHZ" <<'PYEOF'
+python3 - "${WORK_DIR}/dt.img" "$TARGET_GPU_HZ" "$STOCK_GPU_HZ" "$TARGET_CPU_HZ" "$STOCK_CPU_HZ" "$TARGET_CPU_KHZ" "$STOCK_CPU_KHZ" <<'PYEOF'
 import sys, struct
 
 path = sys.argv[1]
-target_gpu = int(sys.argv[2])
-stock_gpu  = int(sys.argv[3])
-target_cpu = int(sys.argv[4])
-stock_cpu  = int(sys.argv[5])
+target_gpu  = int(sys.argv[2])
+stock_gpu   = int(sys.argv[3])
+target_cpu_hz = int(sys.argv[4])
+stock_cpu_hz  = int(sys.argv[5])
+target_cpu_khz = int(sys.argv[6])
+stock_cpu_khz  = int(sys.argv[7])
 
 with open(path, 'rb') as f:
     data = bytearray(f.read())
 
 gpu_old = struct.pack('>I', stock_gpu)
 gpu_new = struct.pack('>I', target_gpu)
-cpu_old = struct.pack('>I', stock_cpu)
-cpu_new = struct.pack('>I', target_cpu)
+cpu_hz_old = struct.pack('>I', stock_cpu_hz)
+cpu_hz_new = struct.pack('>I', target_cpu_hz)
+cpu_khz_old = struct.pack('>I', stock_cpu_khz)
+cpu_khz_new = struct.pack('>I', target_cpu_khz)
 
 gpu_count = data.count(gpu_old)
-cpu_count = data.count(cpu_old)
+cpu_hz_count = data.count(cpu_hz_old)
+cpu_khz_count = data.count(cpu_khz_old)
 
 if gpu_count == 0:
     print(f"WARNING: stock GPU freq {stock_gpu} Hz not found in DT image")
 else:
     data = data.replace(gpu_old, gpu_new)
+    print(f"GPU: {gpu_count} occurrence(s) of {stock_gpu} -> {target_gpu} Hz")
 
-if cpu_count == 0:
-    print(f"WARNING: stock CPU freq {stock_cpu} KHz not found in DT image")
+if cpu_hz_count > 0:
+    data = data.replace(cpu_hz_old, cpu_hz_new)
+    print(f"CPU (Hz): {cpu_hz_count} occurrence(s) of {stock_cpu_hz} -> {target_cpu_hz} Hz")
 else:
-    data = data.replace(cpu_old, cpu_new)
+    print(f"INFO: stock CPU freq {stock_cpu_hz} Hz not found as big-endian u32 (expected if DTS source was patched before compilation)")
+
+if cpu_khz_count > 0:
+    data = data.replace(cpu_khz_old, cpu_khz_new)
+    print(f"CPU (KHz): {cpu_khz_count} occurrence(s) of {stock_cpu_khz} -> {target_cpu_khz} KHz")
+else:
+    print(f"INFO: stock CPU freq {stock_cpu_khz} KHz not found as big-endian u32 (expected if DTS source was patched before compilation)")
 
 with open(path, 'wb') as f:
     f.write(data)
 
-print(f"GPU: {gpu_count} occurrence(s) of {stock_gpu} -> {target_gpu} Hz")
-print(f"CPU: {cpu_count} occurrence(s) of {stock_cpu} -> {target_cpu} KHz")
+total = gpu_count + cpu_hz_count + cpu_khz_count
+print(f"Total patches applied in DT image: {total}")
 PYEOF
 
 # ============================================================
@@ -347,7 +407,8 @@ FINAL_SHA256="$(sha256_of "${ARTIFACT_DIR}/recovery.img")"
   printf 'overclock_gpu_mhz=%s\n' "$GPU_MHZ"
   printf 'overclock_cpu_mhz=%s\n' "$CPU_MHZ"
   printf 'gpu_dts_change=%s -> %s Hz\n' "$STOCK_GPU_HZ" "$TARGET_GPU_HZ"
-  printf 'cpu_dts_change=%s -> %s KHz\n' "$STOCK_CPU_KHZ" "$TARGET_CPU_KHZ"
+  printf 'cpu_dts_change=%s -> %s Hz (speed-bin)\n' "$STOCK_CPU_HZ" "$TARGET_CPU_HZ"
+  printf 'cpu_cpufreq_change=%s -> %s KHz (cpufreq-table)\n' "$STOCK_CPU_KHZ" "$TARGET_CPU_KHZ"
   printf 'cpu_max_rate_patched=yes\n'
   printf 'vdd_mx_patched=yes\n'
 } > "${ARTIFACT_DIR}/build-info.txt"
