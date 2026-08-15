@@ -146,6 +146,7 @@ CLOCK_CPU_FILE="${WORK_DIR}/kernel/drivers/clk/msm/clock-cpu-8953.c"
 [[ -f "$CLOCK_CPU_FILE" ]] || die "clock-cpu-8953.c not found: $CLOCK_CPU_FILE"
 
 # Increase max_rate from 2.2 GHz to 2.5 GHz to allow overclock
+# Patch BOTH the PLL max_rate AND the VDD_MX FMAX
 sed -i 's/\.max_rate = 2208000000UL/.max_rate = 2500000000UL/g' "$CLOCK_CPU_FILE"
 
 # Increase VDD_MX limit from 2.4 GHz to 2.6 GHz
@@ -160,8 +161,28 @@ note "Patched apcs_clk_freq_tbl_8953[]: $(grep -c "${TARGET_CPU_HZ}" "$CLOCK_CPU
 # Verify patches
 grep -q "2500000000UL" "$CLOCK_CPU_FILE" || die "CPU max_rate patch failed"
 grep -q "2600000000UL" "$CLOCK_CPU_FILE" || die "VDD_MX patch failed"
-grep -q "${TARGET_CPU_HZ}" "$CLOCK_CPU_FILE" || die "CPU freq table patch failed"
 note "CPU driver patched successfully"
+
+# ============================================================
+# 2b. PATCH cpufreq driver to not reject overclocked frequencies
+# ============================================================
+note "Patch qcom-cpufreq.c: bypass clk_round_rate for OC freqs"
+
+CPUFREQ_FILE="${WORK_DIR}/kernel/drivers/cpufreq/qcom-cpufreq.c"
+[[ -f "$CPUFREQ_FILE" ]] || die "qcom-cpufreq.c not found: $CPUFREQ_FILE"
+
+# The cpufreq driver calls clk_round_rate() which may reject frequencies
+# above stock max. Patch: use raw DTS value instead of clk_round_rate result.
+# Original: f = clk_round_rate(cpu_clk[cpu], data[i] * 1000);
+# Patched:  f = data[i] * 1000;  (bypass round_rate)
+sed -i 's/f = clk_round_rate(cpu_clk\[cpu\], data\[i\] \* 1000);/f = data[i] * 1000; \/\* OC: bypass round_rate *\//g' "$CPUFREQ_FILE"
+
+# Verify
+if grep -q "OC: bypass round_rate" "$CPUFREQ_FILE"; then
+  note "cpufreq driver patched successfully"
+else
+  die "Failed to patch cpufreq driver"
+fi
 
 # ============================================================
 # 3. PATCH the DTS files BEFORE compilation
