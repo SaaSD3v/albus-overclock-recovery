@@ -198,7 +198,8 @@ GPU_CLOCK_FILE="${WORK_DIR}/kernel/drivers/clk/msm/clock-gpu-cobalt.c"
 sed -i '/F_SLEW( 650000000, 1300000000, gpu_pll0_pll_out_even,    1, 0, 0),/a\\tF_SLEW( 700000000, 1400000000, gpu_pll0_pll_out_even,    1, 0, 0),' "$GPU_CLOCK_FILE"
 
 # Raise GPU PLL NOMINAL ceiling from 1300000500 to 1500000000 to allow 1400 MHz PLL output
-sed -i 's/VDD_GPU_PLL_FMAX_MAP3(MIN, 252000000, LOWER, 504000000,\t\t\t\tNOMINAL, 1300000500)/VDD_GPU_PLL_FMAX_MAP3(MIN, 252000000, LOWER, 504000000,\t\t\t\tNOMINAL, 1500000000)/g' "$GPU_CLOCK_FILE"
+# The macro spans two lines: VDD_GPU_PLL_FMAX_MAP3(MIN, ..., LOWER, ...,\n\t\t\t\tNOMINAL, 1300000500)
+sed -i 's/NOMINAL, 1300000500/NOMINAL, 1500000000/g' "$GPU_CLOCK_FILE"
 
 # Verify
 if grep -q "700000000.*gpu_pll0_pll_out_even" "$GPU_CLOCK_FILE"; then
